@@ -1,0 +1,23 @@
+{
+  "name": "openrouter-proxy",
+  "version": "1.0.0",
+  "description": "A zero-dependency proxy for OpenRouter — unlocks free Xiaomi MiMo access and fixes SSE streaming compatibility across AI coding tools.",
+  "main": "proxy.js",
+  "scripts": {
+    "start": "node proxy.js"
+  },
+  "keywords": [
+    "openrouter",
+    "proxy",
+    "xiaomi",
+    "mimo",
+    "claude-code",
+    "sse",
+    "streaming",
+    "openai-compatible"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
