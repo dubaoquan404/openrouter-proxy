@@ -9,6 +9,7 @@
 
 const http = require("http");
 const https = require("https");
+const { Transform } = require("stream");
 const { URL } = require("url");
 
 // ═══════════════════════════════════════════════════════════════
@@ -138,7 +139,7 @@ function flushStopEvents(res, indexes) {
  *  - Injects synthetic signature_delta for thinking blocks
  *  - Ensures message_stop is emitted last
  */
-function createSSEProcessor(res) {
+function createVSCodeSSEFixer(res) {
   let buffer = "";
   let isThinking = false;
   let isRedactedThinking = false;
@@ -195,6 +196,35 @@ function createSSEProcessor(res) {
   return { processChunk, finish };
 }
 
+/** Creates a Transform stream that logs SSE events while passing data through. */
+function createSSELogger() {
+  let buf = "";
+  return new Transform({
+    transform(chunk, _enc, cb) {
+      buf += chunk.toString();
+      const events = buf.split("\n\n");
+      buf = events.pop();
+      for (const raw of events) {
+        const trimmed = raw.trim();
+        if (!trimmed) continue;
+        const { event } = parseSSEBlock(raw);
+        const tag = event || "data";
+        const preview = trimmed.replace(/\n/g, " ").slice(0, 120);
+        log("sse", `${CLR.dim}pipe:${CLR.reset} ${CLR.dim}${tag} ${preview}${CLR.reset}`);
+      }
+      this.push(chunk);
+      cb();
+    },
+    flush(cb) {
+      if (buf.trim()) {
+        const { event } = parseSSEBlock(buf);
+        log("sse", `${CLR.dim}pipe:${CLR.reset} ${CLR.dim}${event || "data"} ${buf.trim().replace(/\n/g, " ").slice(0, 120)}${CLR.reset}`);
+      }
+      cb();
+    },
+  });
+}
+
 // ═══════════════════════════════════════════════════════════════
 //  HTTP Proxy
 // ═══════════════════════════════════════════════════════════════
@@ -210,6 +240,7 @@ function proxyRequest(clientReq, clientRes) {
   headers["x-forwarded-host"] = clientReq.headers.host || "";
   headers["x-forwarded-proto"] = "http";
 
+  const isClaudeVSCode = (clientReq.headers["user-agent"] || "").includes("claude-vscode");
   const wantSSE = isStreamingRequest(clientReq.headers);
   const proto = targetUrl.protocol === "https:" ? https : http;
 
@@ -224,7 +255,8 @@ function proxyRequest(clientReq, clientRes) {
 
   if (CONFIG.verbose) {
     const tag = wantSSE ? `${CLR.magenta}[SSE]${CLR.reset} ` : "";
-    log("proxy", `${tag}${clientReq.method} ${CLR.cyan}${targetUrl.hostname}${CLR.reset}${targetUrl.pathname}${targetUrl.search}`);
+    const ua = isClaudeVSCode ? `${CLR.yellow}[vscode]${CLR.reset} ` : "";
+    log("proxy", `${tag}${ua}${clientReq.method} ${CLR.cyan}${targetUrl.hostname}${CLR.reset}${targetUrl.pathname}${targetUrl.search}`);
   }
 
   const proxyReq = proto.request(options, (proxyRes) => {
@@ -243,16 +275,18 @@ function proxyRequest(clientReq, clientRes) {
 
     clientRes.writeHead(proxyRes.statusCode, proxyRes.statusMessage, resHeaders);
 
-    if (sse) {
-      const processor = createSSEProcessor(clientRes);
-      proxyRes.on("data", processor.processChunk);
-      proxyRes.on("end", processor.finish);
+    if (sse && isClaudeVSCode) {
+      const fixer = createVSCodeSSEFixer(clientRes);
+      proxyRes.on("data", fixer.processChunk);
+      proxyRes.on("end", fixer.finish);
+    } else if (sse) {
+      proxyRes.pipe(createSSELogger()).pipe(clientRes);
     } else {
       proxyRes.pipe(clientRes);
     }
 
     proxyRes.on("end", () => {
-      if (CONFIG.verbose && !sse) {
+      if (CONFIG.verbose) {
         log("info", `Response complete — ${proxyRes.statusCode} ${clientReq.method} ${targetUrl.pathname}`);
       }
     });
