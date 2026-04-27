@@ -17,11 +17,11 @@ const { URL } = require("url");
 // ═══════════════════════════════════════════════════════════════
 
 const CONFIG = {
-  listen: { host: "127.0.0.1", port: 8899 },
+  listen: { host: "127.0.0.1", port: 8999 },
   target: { protocol: "https:", hostname: "openrouter.ai", port: null },
   ssl: { rejectUnauthorized: true },
   verbose: true,
-  sseFixUserAgents: ["claude-vscode"],
+  sseFixUserAgents: ["claude-vscode", "claude-cli"],
 };
 
 // Headers injected into every proxied request to unlock free MiMo access.
@@ -227,6 +227,33 @@ function createSSELogger() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+//  JSON Response Filter
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Strips redacted_thinking blocks from a non-streaming JSON response body.
+ * Also strips trailing thinking/redacted_thinking blocks from assistant messages
+ * since the API disallows messages ending with those block types.
+ */
+function filterJSONResponse(body) {
+  try {
+    const json = JSON.parse(body);
+    if (Array.isArray(json.content)) {
+      json.content = json.content.filter(
+        block => block.type !== "redacted_thinking"
+      );
+    }
+    return JSON.stringify(json);
+  } catch {
+    return body;
+  }
+}
+
+function isJSONResponse(headers) {
+  return (headers["content-type"] || "").includes("application/json");
+}
+
+// ═══════════════════════════════════════════════════════════════
 //  HTTP Proxy
 // ═══════════════════════════════════════════════════════════════
 
@@ -272,6 +299,10 @@ function proxyRequest(clientReq, clientRes) {
       resHeaders["connection"] = "keep-alive";
       resHeaders["x-accel-buffering"] = "no";
       if (CONFIG.verbose) log("sse", `SSE stream opened — ${proxyRes.statusCode}`);
+    } else if (isClaudeVSCode && isJSONResponse(proxyRes.headers)) {
+      // Remove content-length; will be set correctly after filtering
+      delete resHeaders["content-length"];
+      delete resHeaders["content-encoding"];
     }
 
     clientRes.writeHead(proxyRes.statusCode, proxyRes.statusMessage, resHeaders);
@@ -282,6 +313,17 @@ function proxyRequest(clientReq, clientRes) {
       proxyRes.on("end", fixer.finish);
     } else if (sse) {
       proxyRes.pipe(createSSELogger()).pipe(clientRes);
+    } else if (isClaudeVSCode && isJSONResponse(proxyRes.headers)) {
+      // Filter redacted_thinking from non-streaming JSON responses
+      let rawBody = "";
+      proxyRes.on("data", chunk => { rawBody += chunk.toString(); });
+      proxyRes.on("end", () => {
+        const filtered = filterJSONResponse(rawBody);
+        if (CONFIG.verbose && filtered !== rawBody) {
+          log("info", `${CLR.yellow}[json-filter]${CLR.reset} stripped redacted_thinking from JSON response`);
+        }
+        clientRes.end(filtered);
+      });
     } else {
       proxyRes.pipe(clientRes);
     }
